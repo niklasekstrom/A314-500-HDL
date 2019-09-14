@@ -16,12 +16,20 @@ module cmem(
     input [3:0] cp_out_cmem_in,
     output reg [3:0] cp_in_cmem_out,
 
+    input dram_req,
+    input dram_read,
+    input [18:0] dram_address,
+
     output swap_address_mapping
     );
 
-    reg [3:0] data[11:0];
+    reg [3:0] data[15:0];
 
     assign swap_address_mapping = data[11][0];
+    wire autodetect_mode = data[11][1];
+
+    reg dram_ack = 1'b0;
+    reg [19:0] autodetect_address;
 
     reg [3:0] r_events = 4'd0;
     reg [3:0] r_enable = 4'd7;
@@ -40,10 +48,11 @@ module cmem(
     Address map:
     
     reg0-5 - BA0-5
-    regB   - swap
-    regC   - r-events   - SPI läser ska också clear'a
-    regD   - r-enable   - SPI skriver kan trigga IRQ toggle
-    regE   - a-events   - SPI skriver ska synkroniseras med CP läsning
+    regA   - firmware version
+    regB   - autodetect, swap
+    regC   - r-events
+    regD   - r-enable
+    regE   - a-events
     regF   - a-enable
     */
 
@@ -62,6 +71,8 @@ module cmem(
 
     wire a_should_drive = ((wr_a_events ? (a_events | spi_out_cmem_in) : a_events) & (wr_a_enable ? cp_out_cmem_in : a_enable)) != 4'd0 && !a_block;
 
+    reg [19:0] rega_shift_out;
+
     always @(posedge clk200)
     begin
         if (spi_read)
@@ -74,14 +85,33 @@ module cmem(
 
         if (cp_read)
             case (cp_address)
+            4'd10: cp_in_cmem_out <= rega_shift_out[3:0];
             4'd12, 4'd13: cp_in_cmem_out <= 4'd0;
             4'd14: cp_in_cmem_out <= wr_a_events ? (a_events | spi_out_cmem_in) : a_events;
             4'd15: cp_in_cmem_out <= a_enable;
             default: cp_in_cmem_out <= data[cp_address];
             endcase
 
-        if (cp_write && cp_address <= 4'd11)
+        if (cp_write)
             data[cp_address] <= cp_out_cmem_in;
+
+        if (cp_write && cp_address == 4'd11 && cp_out_cmem_in[1])
+            autodetect_address <= 20'hfffff;
+        else if (autodetect_mode && dram_req != dram_ack && !dram_read)
+            autodetect_address <= {dram_address, 1'b0};
+
+        dram_ack <= dram_req;
+
+        if (cp_address == 4'd10)
+        begin
+            if (cp_write)
+                case (cp_out_cmem_in)
+                    4'd1: rega_shift_out <= autodetect_address;
+                    default: rega_shift_out <= 20'd1; // Version
+                endcase
+            else if (cp_read)
+                rega_shift_out[19:0] <= {4'd0, rega_shift_out[19:4]};
+        end
 
         if (wr_a_enable)
             a_enable <= cp_out_cmem_in;
